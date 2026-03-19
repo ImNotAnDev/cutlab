@@ -243,6 +243,19 @@
     display: none;
   }
 
+  .selection-handle {
+    position: absolute;
+    top: 0;
+    width: 10px;
+    height: 100%;
+    margin-left: -5px;
+    background: rgba(232,255,71,0.35);
+    border: 1px solid rgba(232,255,71,0.85);
+    cursor: ew-resize;
+    z-index: 5;
+    display: none;
+  }
+
   .timeline-hint {
     font-family: 'Space Mono', monospace;
     font-size: 9px;
@@ -637,9 +650,11 @@
     <div class="waveform-container" id="waveformContainer">
       <canvas id="waveform"></canvas>
       <div class="selection-region" id="selectionRegion"></div>
+      <div class="selection-handle" id="selectionStartHandle" title="Arraste para ajustar o início"></div>
+      <div class="selection-handle" id="selectionEndHandle" title="Arraste para ajustar o fim"></div>
       <div class="playhead" id="playhead" style="left:0; display:none"></div>
     </div>
-    <div class="timeline-hint">Clique para posicionar · Arraste para selecionar região · ✂ Cortar para marcar</div>
+    <div class="timeline-hint">Clique para posicionar · Arraste para selecionar · Arraste as alças para ajustar início/fim</div>
   </div>
 
 </div>
@@ -667,6 +682,8 @@ const timeDisplay = document.getElementById('timeDisplay');
 const waveformCanvas = document.getElementById('waveform');
 const waveformContainer = document.getElementById('waveformContainer');
 const selectionRegion = document.getElementById('selectionRegion');
+const selectionStartHandle = document.getElementById('selectionStartHandle');
+const selectionEndHandle = document.getElementById('selectionEndHandle');
 const playheadEl = document.getElementById('playhead');
 const btnPlay = document.getElementById('btnPlay');
 const btnMark = document.getElementById('btnMark');
@@ -687,11 +704,14 @@ let audioBuf = null;
 let cuts = [];
 let selA = null, selB = null;
 let isDragging = false, dragStart = null;
+let dragMode = null;
+let dragMoved = false;
 let playheadRAF = null;
 let selectedFormat = 'video';
 let audioCtx = null;
 let selectionPlaybackHandler = null;
 const SEEK_STEP_SECONDS = 0.2;
+const SELECTION_MIN_SECONDS = 0.05;
 let suppressNextPlayButtonClick = false;
 
 // --- FORMAT SELECT ---
@@ -733,6 +753,9 @@ function loadFile(file) {
   btnExport.disabled = false;
   cuts = [];
   selA = selB = null;
+  selectionRegion.style.display = 'none';
+  selectionStartHandle.style.display = 'none';
+  selectionEndHandle.style.display = 'none';
   renderCuts();
   updateSelUI();
 
@@ -845,7 +868,19 @@ function updateTimeDisplay() {
 
 // --- PLAY / PAUSE ---
 function hasValidSelection() {
-  return selA !== null && selB !== null && Math.abs(selA - selB) > 0.05;
+  return selA !== null && selB !== null && Math.abs(selA - selB) > SELECTION_MIN_SECONDS;
+}
+
+function getSelectionRange() {
+  if (!hasValidSelection()) return null;
+  return { start: Math.min(selA, selB), end: Math.max(selA, selB) };
+}
+
+function setSelectionRange(start, end) {
+  selA = start;
+  selB = end;
+  updateSelRegion();
+  updateSelUI();
 }
 
 function clearSelectionPlaybackListener() {
@@ -991,35 +1026,82 @@ btnMark.addEventListener('click', () => {
 
 // --- TIMELINE INTERACTION ---
 waveformContainer.addEventListener('mousedown', e => {
-  if (!mediaEl || !mediaEl.duration) return;
+  if (e.button !== 0 || !mediaEl || !mediaEl.duration) return;
   isDragging = true;
+  dragMode = 'create';
+  dragMoved = false;
   const pct = getPct(e);
   dragStart = pct * mediaEl.duration;
-  selA = dragStart;
-  selB = dragStart;
-  updateSelRegion();
   mediaEl.currentTime = dragStart;
   updatePlayhead();
+});
+
+selectionStartHandle.addEventListener('mousedown', e => {
+  if (e.button !== 0 || !mediaEl || !hasValidSelection()) return;
+  e.preventDefault();
+  e.stopPropagation();
+  isDragging = true;
+  dragMode = 'start';
+  dragMoved = false;
+});
+
+selectionEndHandle.addEventListener('mousedown', e => {
+  if (e.button !== 0 || !mediaEl || !hasValidSelection()) return;
+  e.preventDefault();
+  e.stopPropagation();
+  isDragging = true;
+  dragMode = 'end';
+  dragMoved = false;
 });
 
 window.addEventListener('mousemove', e => {
   if (!isDragging || !mediaEl) return;
   const pct = Math.max(0, Math.min(1, getPct(e)));
-  selB = pct * mediaEl.duration;
-  updateSelRegion();
-  mediaEl.currentTime = Math.max(0, Math.min(mediaEl.duration, selB));
-  updatePlayhead();
+  const t = pct * mediaEl.duration;
+
+  if (dragMode === 'create') {
+    if (Math.abs(t - dragStart) > SELECTION_MIN_SECONDS) {
+      dragMoved = true;
+      setSelectionRange(Math.min(dragStart, t), Math.max(dragStart, t));
+      mediaEl.currentTime = t;
+      updatePlayhead();
+    }
+    return;
+  }
+
+  const range = getSelectionRange();
+  if (!range) return;
+
+  if (dragMode === 'start') {
+    dragMoved = true;
+    const nextStart = Math.max(0, Math.min(t, range.end - SELECTION_MIN_SECONDS));
+    setSelectionRange(nextStart, range.end);
+    mediaEl.currentTime = nextStart;
+    updatePlayhead();
+    return;
+  }
+
+  if (dragMode === 'end') {
+    dragMoved = true;
+    const nextEnd = Math.min(mediaEl.duration, Math.max(t, range.start + SELECTION_MIN_SECONDS));
+    setSelectionRange(range.start, nextEnd);
+    mediaEl.currentTime = nextEnd;
+    updatePlayhead();
+  }
 });
 
 window.addEventListener('mouseup', () => {
   if (!isDragging) return;
-  isDragging = false;
-  if (selA !== null && selB !== null && Math.abs(selA - selB) < 0.05) {
-    // Just a click, no real selection
-    clearSelection();
-  } else {
-    updateSelUI();
+
+  if (dragMode === 'create' && !dragMoved && mediaEl) {
+    mediaEl.currentTime = dragStart;
+    updatePlayhead();
   }
+
+  isDragging = false;
+  dragMode = null;
+  dragMoved = false;
+  updateSelUI();
 });
 
 function getPct(e) {
@@ -1028,17 +1110,26 @@ function getPct(e) {
 }
 
 function updateSelRegion() {
-  if (selA === null || selB === null || !mediaEl) return;
+  if (selA === null || selB === null || !mediaEl || !hasValidSelection()) {
+    selectionRegion.style.display = 'none';
+    selectionStartHandle.style.display = 'none';
+    selectionEndHandle.style.display = 'none';
+    return;
+  }
   const dur = mediaEl.duration;
   const a = Math.min(selA, selB) / dur * 100;
   const b = Math.max(selA, selB) / dur * 100;
   selectionRegion.style.display = 'block';
   selectionRegion.style.left = a + '%';
   selectionRegion.style.width = (b - a) + '%';
+  selectionStartHandle.style.display = 'block';
+  selectionEndHandle.style.display = 'block';
+  selectionStartHandle.style.left = a + '%';
+  selectionEndHandle.style.left = b + '%';
 }
 
 function updateSelUI() {
-  if (selA !== null && selB !== null && Math.abs(selA - selB) > 0.05) {
+  if (hasValidSelection()) {
     const a = Math.min(selA, selB), b = Math.max(selA, selB);
     selStart.textContent = fmtTime(a);
     selEnd.textContent = fmtTime(b);
@@ -1052,6 +1143,8 @@ function clearSelection() {
   selA = null;
   selB = null;
   selectionRegion.style.display = 'none';
+  selectionStartHandle.style.display = 'none';
+  selectionEndHandle.style.display = 'none';
   updateSelUI();
 }
 
@@ -1132,7 +1225,7 @@ function getSegments() {
 async function exportMedia() {
   if (!mediaFile || !mediaEl || !mediaEl.duration) return;
 
-  const [start, end] = selA !== null && selB !== null && Math.abs(selA-selB) > 0.05
+  const [start, end] = hasValidSelection()
     ? [Math.min(selA,selB), Math.max(selA,selB)]
     : [0, mediaEl.duration];
 
