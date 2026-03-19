@@ -596,6 +596,9 @@
         <div class="info-row"><span class="info-key">Fim</span><span class="info-val" id="selEnd">—</span></div>
         <div class="info-row"><span class="info-key">Duração</span><span class="info-val" id="selDur">—</span></div>
       </div>
+      <div class="timeline-hint" style="margin-top:10px; line-height:1.5;">
+        Atalhos: Enter toca seleção · Espaço play/pause · Shift+Espaço reinicia seleção · Esc limpa seleção · ←/→ navega 200ms
+      </div>
     </div>
 
     <div class="sidebar-label" style="padding:12px 16px 0">Cortes <span id="cutsCountBadge"></span></div>
@@ -687,6 +690,9 @@ let isDragging = false, dragStart = null;
 let playheadRAF = null;
 let selectedFormat = 'video';
 let audioCtx = null;
+let selectionPlaybackHandler = null;
+const SEEK_STEP_SECONDS = 0.2;
+let suppressNextPlayButtonClick = false;
 
 // --- FORMAT SELECT ---
 function selectFormat(btn, fmt) {
@@ -838,25 +844,123 @@ function updateTimeDisplay() {
 }
 
 // --- PLAY / PAUSE ---
-btnPlay.addEventListener('click', () => {
+function hasValidSelection() {
+  return selA !== null && selB !== null && Math.abs(selA - selB) > 0.05;
+}
+
+function clearSelectionPlaybackListener() {
+  if (!mediaEl || !selectionPlaybackHandler) return;
+  mediaEl.removeEventListener('timeupdate', selectionPlaybackHandler);
+  selectionPlaybackHandler = null;
+}
+
+function playSelectedRegion() {
+  if (!mediaEl || !hasValidSelection()) return;
+  const [a, b] = [Math.min(selA, selB), Math.max(selA, selB)];
+  clearSelectionPlaybackListener();
+  mediaEl.currentTime = a;
+  mediaEl.play();
+
+  selectionPlaybackHandler = () => {
+    if (mediaEl.currentTime >= b) {
+      mediaEl.pause();
+      clearSelectionPlaybackListener();
+    }
+  };
+  mediaEl.addEventListener('timeupdate', selectionPlaybackHandler);
+}
+
+function toggleMediaPlayback() {
   if (!mediaEl) return;
   if (mediaEl.paused) {
-    // If selection, play selection range
-    if (selA !== null && selB !== null) {
-      const [a, b] = [Math.min(selA,selB), Math.max(selA,selB)];
-      mediaEl.currentTime = a;
-      mediaEl.play();
-      const check = () => {
-        if (mediaEl.currentTime >= b) { mediaEl.pause(); mediaEl.removeEventListener('timeupdate', check); }
-      };
-      mediaEl.addEventListener('timeupdate', check);
+    if (hasValidSelection()) {
+      playSelectedRegion();
     } else {
+      clearSelectionPlaybackListener();
       mediaEl.play();
     }
-    btnPlay.textContent = '⏸ Pause';
   } else {
+    clearSelectionPlaybackListener();
     mediaEl.pause();
-    btnPlay.textContent = '▶ Play';
+  }
+}
+
+function toggleSimplePlayback() {
+  if (!mediaEl) return;
+  if (mediaEl.paused) {
+    clearSelectionPlaybackListener();
+    mediaEl.play();
+  } else {
+    clearSelectionPlaybackListener();
+    mediaEl.pause();
+  }
+}
+
+btnPlay.addEventListener('click', e => {
+  // Space on a focused button can dispatch a synthetic click; ignore that one.
+  if (suppressNextPlayButtonClick && e.detail === 0) {
+    suppressNextPlayButtonClick = false;
+    return;
+  }
+  toggleMediaPlayback();
+});
+
+document.addEventListener('keydown', e => {
+  if (!mediaEl) return;
+
+  const target = e.target;
+  const isEditable = target && (
+    target.tagName === 'INPUT' ||
+    target.tagName === 'TEXTAREA' ||
+    target.tagName === 'SELECT' ||
+    target.isContentEditable
+  );
+  if (isEditable) return;
+
+  const isSpace = e.key === ' ' || e.key === 'Spacebar';
+
+  if (isSpace && e.shiftKey) {
+    e.preventDefault();
+    if (hasValidSelection()) {
+      playSelectedRegion();
+    } else {
+      toggleSimplePlayback();
+    }
+    return;
+  }
+
+  if (e.key === 'Escape') {
+    if (hasValidSelection()) {
+      e.preventDefault();
+      clearSelection();
+      toast('Seleção limpa');
+    }
+    return;
+  }
+
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+    e.preventDefault();
+    clearSelectionPlaybackListener();
+    const dir = e.key === 'ArrowRight' ? 1 : -1;
+    const next = mediaEl.currentTime + dir * SEEK_STEP_SECONDS;
+    mediaEl.currentTime = Math.max(0, Math.min(mediaEl.duration || 0, next));
+    updatePlayhead();
+    return;
+  }
+
+  if (e.key === 'Enter') {
+    if (hasValidSelection()) {
+      e.preventDefault();
+      playSelectedRegion();
+    }
+    return;
+  }
+
+  if (isSpace) {
+    e.preventDefault();
+    suppressNextPlayButtonClick = true;
+    setTimeout(() => { suppressNextPlayButtonClick = false; }, 0);
+    toggleSimplePlayback();
   }
 });
 
@@ -864,6 +968,8 @@ btnPlay.addEventListener('click', () => {
 document.addEventListener('DOMContentLoaded', () => {});
 ['ended','pause'].forEach(ev => videoEl.addEventListener(ev, () => btnPlay.textContent = '▶ Play'));
 ['ended','pause'].forEach(ev => audioEl.addEventListener(ev, () => btnPlay.textContent = '▶ Play'));
+['play'].forEach(ev => videoEl.addEventListener(ev, () => btnPlay.textContent = '⏸ Pause'));
+['play'].forEach(ev => audioEl.addEventListener(ev, () => btnPlay.textContent = '⏸ Pause'));
 
 // --- SPEED ---
 speedRange.addEventListener('input', () => {
@@ -910,9 +1016,7 @@ window.addEventListener('mouseup', () => {
   isDragging = false;
   if (selA !== null && selB !== null && Math.abs(selA - selB) < 0.05) {
     // Just a click, no real selection
-    selA = selB = null;
-    selectionRegion.style.display = 'none';
-    updateSelUI();
+    clearSelection();
   } else {
     updateSelUI();
   }
@@ -942,6 +1046,13 @@ function updateSelUI() {
   } else {
     selStart.textContent = selEnd.textContent = selDur.textContent = '—';
   }
+}
+
+function clearSelection() {
+  selA = null;
+  selB = null;
+  selectionRegion.style.display = 'none';
+  updateSelUI();
 }
 
 // --- CUTS RENDER ---
